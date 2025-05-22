@@ -1,76 +1,58 @@
-import paramiko
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives import serialization
-import os
+name: Industrialisation continue sur le serveur Alwaysdata
 
-def generate_ssh_key_pair():
-    # Génération de la clé privée Ed25519 avec la bibliothèque cryptography
-    private_key = ed25519.Ed25519PrivateKey.generate()
-    
-    # Exporter la clé privée en format OpenSSH
-    private_key_openssh = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.OpenSSH,
-        encryption_algorithm=serialization.NoEncryption()
-    ).decode('utf-8')
-    
-    # Générer la clé publique correspondante
-    public_key = private_key.public_key()
-    
-    # Encoder la clé publique au format OpenSSH
-    public_key_ssh = public_key.public_bytes(
-        encoding=serialization.Encoding.OpenSSH,
-        format=serialization.PublicFormat.OpenSSH
-    ).decode('utf-8') + " user@localhost"
-    
-    return private_key_openssh, public_key_ssh
+on: push
 
-# Génération des clés
-private_key, public_key = generate_ssh_key_pair()
+jobs:
+  Connexion:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connexion SSH avec le serveur
+        uses: appleboy/ssh-action@master
+        with:
+          host: "ssh-${{ secrets.USERNAME }}.alwaysdata.net"
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd $HOME/www/
 
-# Afficher les clés
-print("Clé privée :\n", private_key)
-print("\nClé publique :\n", public_key)
+  Copy:
+    needs: Connexion
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connexion SSH avec le serveur
+        uses: appleboy/ssh-action@master
+        with:
+          host: "ssh-${{ secrets.USERNAME }}.alwaysdata.net"
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            last_directory=$(basename ${{ runner.workspace }})
+            cd $HOME/www/
+            git clone https://github.com/${{ github.repository }}.git
+            if [ "$(ls -A ./flask)" ]; then
+              rsync -r ./$last_directory/ ./flask
+              rm -rf ./$last_directory
+            else
+              echo "Le répertoire flask de destination sur votre serveur n'existe pas"
+              exit 1
+            fi
 
-# Sauvegarder dans des fichiers
-with open("id_ed25519", "w") as priv_file:
-    priv_file.write(private_key)
-    priv_file.write("\n")
-    os.chmod("id_ed25519", 0o600)  # Restreindre les permissions de la clé privée
-
-with open("id_ed25519.pub", "w") as pub_file:
-    pub_file.write(public_key)
-
-# Déposer la clé publique sur un serveur via SSH
-def upload_public_key_to_server(public_key, hostname, username, password):
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        ssh.connect(hostname, username=username, password=password)
-        sftp = ssh.open_sftp()
-        authorized_keys_path = '/home/{}/.ssh/authorized_keys'.format(username)
-        
-        try:
-            # Créer le dossier .ssh s'il n'existe pas
-            sftp.mkdir('/home/{}/.ssh'.format(username))
-        except IOError:
-            # Si le dossier existe déjà, ignorer l'erreur
-            pass
-        
-        # Ouvrir le fichier authorized_keys et ajouter la clé publique
-        with sftp.open(authorized_keys_path, 'a') as authorized_keys_file:
-            authorized_keys_file.write(public_key + "\n")
-        
-        print("Clé publique ajoutée avec succès au fichier authorized_keys.")
-    except Exception as e:
-        print(f"Erreur lors de la connexion au serveur : {e}")
-    finally:
-        ssh.close()
-
-# Informations du serveur
-hostname = "votre_serveur"
-username = "votre_utilisateur"
-password = "votre_mot_de_passe"
-
-# Déposer la clé publique sur le serveur
-upload_public_key_to_server(public_key, hostname, username, password)
+  Restart:
+    needs: Copy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restart Alwaysdata site
+        run: |
+          response_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST --basic --user "${{ secrets.ALWAYSDATA_TOKEN }}:" https://api.alwaysdata.com/v1/site/${{ secrets.ALWAYSDATA_SITE_ID }}/restart/)
+          if [ "$response_code" -eq 204 ]; then
+            echo "Relance de votre site réussi"
+          elif [ "$response_code" -eq 404 ]; then
+            echo "Vous n'avez pas renseigné correctement votre secret ALWAYSDATA_SITE_ID"
+            exit 1
+          elif [ "$response_code" -eq 401 ]; then
+            echo "Vous n'avez pas renseigné correctement votre secret ALWAYSDATA_TOKEN"
+            exit 1
+          else
+            echo "Échec du redémarrage avec le code de réponse : $response_code"
+            exit 1
+          fi
